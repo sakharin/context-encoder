@@ -36,11 +36,11 @@ torch.manualSeed(opt.manualSeed)
 -- load Context-Encoder
 assert(opt.net ~= '', 'provide a generator model')
 net = util.load(opt.net, opt.gpu)
-net:evaluate()
+net:evaluate() -- Set train=false. Dropout, batch_normalization, etc. changes
 
 -- initialize variables
 input_image_ctx = torch.Tensor(opt.batchSize, opt.nc, opt.fineSize, opt.fineSize)
-local noise 
+local noise
 if opt.noiseGen then
     noise = torch.Tensor(opt.batchSize, opt.nz, 1, 1)
     if opt.noisetype == 'uniform' then

@@ -2,10 +2,13 @@ require 'torch'
 require 'nn'
 require 'optim'
 require 'image'
+require 'os'
 util = paths.dofile('util.lua')
 
 opt = {
    batchSize = 64,         -- number of samples to produce
+   netG = '',              -- path to trained generator. Specify when fine tune.
+   netD = '',              -- path to trained discriminator. Specify when fine tune.
    loadSize = 350,         -- resize the loaded image to loadsize maintaining aspect ratio. 0 means don't resize. -1 means scale randomly between [0.5,2] -- see donkey_folder.lua
    fineSize = 128,         -- size of random crops. Only 64 and 128 supported.
    nBottleneck = 100,      -- #  of dim for bottleneck of encoder
@@ -53,18 +56,9 @@ local DataLoader = paths.dofile('data/data.lua')
 local data = DataLoader.new(opt.nThreads, opt)
 print("Dataset Size: ", data:size())
 
----------------------------------------------------------------------------
--- Initialize network variables
----------------------------------------------------------------------------
-local function weights_init(m)
-   local name = torch.type(m)
-   if name:find('Convolution') then
-      m.weight:normal(0.0, 0.02)
-      m.bias:fill(0)
-   elseif name:find('BatchNormalization') then
-      if m.weight then m.weight:normal(1.0, 0.02) end
-      if m.bias then m.bias:fill(0) end
-   end
+if opt.netG ~= '' and opt.netD ~= '' then
+   netG = util.load(opt.netG, opt.gpu)
+   netD = util.load(opt.netD, opt.gpu)
 end
 
 local nc = opt.nc
@@ -76,142 +70,161 @@ local nef = opt.nef
 local real_label = 1
 local fake_label = 0
 
-local SpatialBatchNormalization = nn.SpatialBatchNormalization
-local SpatialConvolution = nn.SpatialConvolution
-local SpatialFullConvolution = nn.SpatialFullConvolution
-
----------------------------------------------------------------------------
--- Generator net
----------------------------------------------------------------------------
--- Encode Input Context to noise (architecture similar to Discriminator)
-local netE = nn.Sequential()
--- input is (nc) x 128 x 128
-netE:add(SpatialConvolution(nc, nef, 4, 4, 2, 2, 1, 1))
-netE:add(nn.LeakyReLU(0.2, true))
-if opt.fineSize == 128 then
-  -- state size: (nef) x 64 x 64
-  netE:add(SpatialConvolution(nef, nef, 4, 4, 2, 2, 1, 1))
-  netE:add(SpatialBatchNormalization(nef)):add(nn.LeakyReLU(0.2, true))
-end
--- state size: (nef) x 32 x 32
-netE:add(SpatialConvolution(nef, nef * 2, 4, 4, 2, 2, 1, 1))
-netE:add(SpatialBatchNormalization(nef * 2)):add(nn.LeakyReLU(0.2, true))
--- state size: (nef*2) x 16 x 16
-netE:add(SpatialConvolution(nef * 2, nef * 4, 4, 4, 2, 2, 1, 1))
-netE:add(SpatialBatchNormalization(nef * 4)):add(nn.LeakyReLU(0.2, true))
--- state size: (nef*4) x 8 x 8
-netE:add(SpatialConvolution(nef * 4, nef * 8, 4, 4, 2, 2, 1, 1))
-netE:add(SpatialBatchNormalization(nef * 8)):add(nn.LeakyReLU(0.2, true))
--- state size: (nef*8) x 4 x 4
-netE:add(SpatialConvolution(nef * 8, nBottleneck, 4, 4))
--- state size: (nBottleneck) x 1 x 1
-
-local netG = nn.Sequential()
-local nz_size = nBottleneck
-if opt.noiseGen then
-    local netG_noise = nn.Sequential()
-    -- input is Z: (nz) x 1 x 1, going into a convolution
-    netG_noise:add(SpatialConvolution(nz, nz, 1, 1, 1, 1, 0, 0))
-    -- state size: (nz) x 1 x 1
-
-    local netG_pl = nn.ParallelTable();
-    netG_pl:add(netE)
-    netG_pl:add(netG_noise)
-
-    netG:add(netG_pl)
-    netG:add(nn.JoinTable(2))
-    netG:add(SpatialBatchNormalization(nBottleneck+nz)):add(nn.LeakyReLU(0.2, true))
-    -- state size: (nBottleneck+nz) x 1 x 1
-
-    nz_size = nBottleneck+nz
+if netG and netD then
+   print('Fine tune')
 else
-    netG:add(netE)
-    netG:add(SpatialBatchNormalization(nBottleneck)):add(nn.LeakyReLU(0.2, true))
+   print('Learn from scratch')
+   ---------------------------------------------------------------------------
+   -- Initialize network variables
+   ---------------------------------------------------------------------------
+   local function weights_init(m)
+      local name = torch.type(m)
+      if name:find('Convolution') then
+         m.weight:normal(0.0, 0.02)
+         m.bias:fill(0)
+      elseif name:find('BatchNormalization') then
+         if m.weight then m.weight:normal(1.0, 0.02) end
+         if m.bias then m.bias:fill(0) end
+      end
+   end
 
-    nz_size = nBottleneck
+   SpatialBatchNormalization = nn.SpatialBatchNormalization
+   SpatialConvolution = nn.SpatialConvolution
+   SpatialFullConvolution = nn.SpatialFullConvolution
+
+   ---------------------------------------------------------------------------
+   -- Generator net
+   ---------------------------------------------------------------------------
+   -- Encode Input Context to noise (architecture similar to Discriminator)
+   netE = nn.Sequential()
+   -- input is (nc) x 128 x 128
+   netE:add(SpatialConvolution(nc, nef, 4, 4, 2, 2, 1, 1))
+   netE:add(nn.LeakyReLU(0.2, true))
+   if opt.fineSize == 128 then
+      -- state size: (nef) x 64 x 64
+      netE:add(SpatialConvolution(nef, nef, 4, 4, 2, 2, 1, 1))
+      netE:add(SpatialBatchNormalization(nef)):add(nn.LeakyReLU(0.2, true))
+   end
+   -- state size: (nef) x 32 x 32
+   netE:add(SpatialConvolution(nef, nef * 2, 4, 4, 2, 2, 1, 1))
+   netE:add(SpatialBatchNormalization(nef * 2)):add(nn.LeakyReLU(0.2, true))
+   -- state size: (nef*2) x 16 x 16
+   netE:add(SpatialConvolution(nef * 2, nef * 4, 4, 4, 2, 2, 1, 1))
+   netE:add(SpatialBatchNormalization(nef * 4)):add(nn.LeakyReLU(0.2, true))
+   -- state size: (nef*4) x 8 x 8
+   netE:add(SpatialConvolution(nef * 4, nef * 8, 4, 4, 2, 2, 1, 1))
+   netE:add(SpatialBatchNormalization(nef * 8)):add(nn.LeakyReLU(0.2, true))
+   -- state size: (nef*8) x 4 x 4
+   netE:add(SpatialConvolution(nef * 8, nBottleneck, 4, 4))
+   -- state size: (nBottleneck) x 1 x 1
+
+   netG = nn.Sequential()
+   nz_size = nBottleneck
+   if opt.noiseGen then
+       netG_noise = nn.Sequential()
+       -- input is Z: (nz) x 1 x 1, going into a convolution
+       netG_noise:add(SpatialConvolution(nz, nz, 1, 1, 1, 1, 0, 0))
+       -- state size: (nz) x 1 x 1
+
+       netG_pl = nn.ParallelTable();
+       netG_pl:add(netE)
+       netG_pl:add(netG_noise)
+
+       netG:add(netG_pl)
+       netG:add(nn.JoinTable(2))
+       netG:add(SpatialBatchNormalization(nBottleneck+nz)):add(nn.LeakyReLU(0.2, true))
+       -- state size: (nBottleneck+nz) x 1 x 1
+
+       nz_size = nBottleneck+nz
+   else
+       netG:add(netE)
+       netG:add(SpatialBatchNormalization(nBottleneck)):add(nn.LeakyReLU(0.2, true))
+
+       nz_size = nBottleneck
+   end
+
+   -- Decode noise to generate image
+   -- input is Z: (nz_size) x 1 x 1, going into a convolution
+   netG:add(SpatialFullConvolution(nz_size, ngf * 8, 4, 4))
+   netG:add(SpatialBatchNormalization(ngf * 8)):add(nn.ReLU(true))
+   -- state size: (ngf*8) x 4 x 4
+   netG:add(SpatialFullConvolution(ngf * 8, ngf * 4, 4, 4, 2, 2, 1, 1))
+   netG:add(SpatialBatchNormalization(ngf * 4)):add(nn.ReLU(true))
+   -- state size: (ngf*4) x 8 x 8
+   netG:add(SpatialFullConvolution(ngf * 4, ngf * 2, 4, 4, 2, 2, 1, 1))
+   netG:add(SpatialBatchNormalization(ngf * 2)):add(nn.ReLU(true))
+   -- state size: (ngf*2) x 16 x 16
+   netG:add(SpatialFullConvolution(ngf * 2, ngf, 4, 4, 2, 2, 1, 1))
+   netG:add(SpatialBatchNormalization(ngf)):add(nn.ReLU(true))
+   -- state size: (ngf) x 32 x 32
+   if opt.fineSize == 128 then
+      netG:add(SpatialFullConvolution(ngf, ngf, 4, 4, 2, 2, 1, 1))
+      netG:add(SpatialBatchNormalization(ngf)):add(nn.ReLU(true))
+      -- state size: (ngf) x 64 x 64
+   end
+   netG:add(SpatialFullConvolution(ngf, nc, 4, 4, 2, 2, 1, 1))
+   netG:add(nn.Tanh())
+   -- state size: (nc) x 128 x 128
+
+   netG:apply(weights_init)
+
+   ---------------------------------------------------------------------------
+   -- Adversarial discriminator net
+   ---------------------------------------------------------------------------
+   netD = nn.Sequential()
+   if opt.conditionAdv then
+       print('conditional adv not implemented')
+       exit()
+       netD_ctx = nn.Sequential()
+       -- input Context: (nc) x 128 x 128, going into a convolution
+       netD_ctx:add(SpatialConvolution(nc, ndf, 5, 5, 2, 2, 2, 2))
+       -- state size: (ndf) x 64 x 64
+
+       netD_pred = nn.Sequential()
+       -- input pred: (nc) x 64 x 64, going into a convolution
+       netD_pred:add(SpatialConvolution(nc, ndf, 5, 5, 2, 2, 2+32, 2+32))      -- 32: to keep scaling of features same as context
+       -- state size: (ndf) x 64 x 64
+
+       netD_pl = nn.ParallelTable();
+       netD_pl:add(netD_ctx)
+       netD_pl:add(netD_pred)
+
+       netD:add(netD_pl)
+       netD:add(nn.JoinTable(2))
+       netD:add(nn.LeakyReLU(0.2, true))
+       -- state size: (ndf * 2) x 64 x 64
+
+       netD:add(SpatialConvolution(ndf*2, ndf, 4, 4, 2, 2, 1, 1))
+       netD:add(SpatialBatchNormalization(ndf)):add(nn.LeakyReLU(0.2, true))
+       -- state size: (ndf) x 32 x 32
+   else
+       -- input is (nc) x 128 x 128, going into a convolution
+       netD:add(SpatialConvolution(nc, ndf, 4, 4, 2, 2, 1, 1))
+       netD:add(nn.LeakyReLU(0.2, true))
+       -- state size: (ndf) x 64 x 64
+   end
+   if opt.fineSize == 128 then
+      netD:add(SpatialConvolution(ndf, ndf, 4, 4, 2, 2, 1, 1))
+      netD:add(SpatialBatchNormalization(ndf)):add(nn.LeakyReLU(0.2, true))
+      -- state size: (ndf) x 32 x 32
+   end
+   netD:add(SpatialConvolution(ndf, ndf * 2, 4, 4, 2, 2, 1, 1))
+   netD:add(SpatialBatchNormalization(ndf * 2)):add(nn.LeakyReLU(0.2, true))
+   -- state size: (ndf*2) x 16 x 16
+   netD:add(SpatialConvolution(ndf * 2, ndf * 4, 4, 4, 2, 2, 1, 1))
+   netD:add(SpatialBatchNormalization(ndf * 4)):add(nn.LeakyReLU(0.2, true))
+   -- state size: (ndf*4) x 8 x 8
+   netD:add(SpatialConvolution(ndf * 4, ndf * 8, 4, 4, 2, 2, 1, 1))
+   netD:add(SpatialBatchNormalization(ndf * 8)):add(nn.LeakyReLU(0.2, true))
+   -- state size: (ndf*8) x 4 x 4
+   netD:add(SpatialConvolution(ndf * 8, 1, 4, 4))
+   netD:add(nn.Sigmoid())
+   -- state size: 1 x 1 x 1
+   netD:add(nn.View(1):setNumInputDims(3))
+   -- state size: 1
+
+   netD:apply(weights_init)
 end
-
--- Decode noise to generate image
--- input is Z: (nz_size) x 1 x 1, going into a convolution
-netG:add(SpatialFullConvolution(nz_size, ngf * 8, 4, 4))
-netG:add(SpatialBatchNormalization(ngf * 8)):add(nn.ReLU(true))
--- state size: (ngf*8) x 4 x 4
-netG:add(SpatialFullConvolution(ngf * 8, ngf * 4, 4, 4, 2, 2, 1, 1))
-netG:add(SpatialBatchNormalization(ngf * 4)):add(nn.ReLU(true))
--- state size: (ngf*4) x 8 x 8
-netG:add(SpatialFullConvolution(ngf * 4, ngf * 2, 4, 4, 2, 2, 1, 1))
-netG:add(SpatialBatchNormalization(ngf * 2)):add(nn.ReLU(true))
--- state size: (ngf*2) x 16 x 16
-netG:add(SpatialFullConvolution(ngf * 2, ngf, 4, 4, 2, 2, 1, 1))
-netG:add(SpatialBatchNormalization(ngf)):add(nn.ReLU(true))
--- state size: (ngf) x 32 x 32
-if opt.fineSize == 128 then
-  netG:add(SpatialFullConvolution(ngf, ngf, 4, 4, 2, 2, 1, 1))
-  netG:add(SpatialBatchNormalization(ngf)):add(nn.ReLU(true))
-  -- state size: (ngf) x 64 x 64
-end
-netG:add(SpatialFullConvolution(ngf, nc, 4, 4, 2, 2, 1, 1))
-netG:add(nn.Tanh())
--- state size: (nc) x 128 x 128
-
-netG:apply(weights_init)
-
----------------------------------------------------------------------------
--- Adversarial discriminator net
----------------------------------------------------------------------------
-local netD = nn.Sequential()
-if opt.conditionAdv then
-    print('conditional adv not implemented')
-    exit()
-    local netD_ctx = nn.Sequential()
-    -- input Context: (nc) x 128 x 128, going into a convolution
-    netD_ctx:add(SpatialConvolution(nc, ndf, 5, 5, 2, 2, 2, 2))
-    -- state size: (ndf) x 64 x 64
-
-    local netD_pred = nn.Sequential()
-    -- input pred: (nc) x 64 x 64, going into a convolution
-    netD_pred:add(SpatialConvolution(nc, ndf, 5, 5, 2, 2, 2+32, 2+32))      -- 32: to keep scaling of features same as context
-    -- state size: (ndf) x 64 x 64
-
-    local netD_pl = nn.ParallelTable();
-    netD_pl:add(netD_ctx)
-    netD_pl:add(netD_pred)
-
-    netD:add(netD_pl)
-    netD:add(nn.JoinTable(2))
-    netD:add(nn.LeakyReLU(0.2, true))
-    -- state size: (ndf * 2) x 64 x 64
-
-    netD:add(SpatialConvolution(ndf*2, ndf, 4, 4, 2, 2, 1, 1))
-    netD:add(SpatialBatchNormalization(ndf)):add(nn.LeakyReLU(0.2, true))
-    -- state size: (ndf) x 32 x 32
-else
-    -- input is (nc) x 128 x 128, going into a convolution
-    netD:add(SpatialConvolution(nc, ndf, 4, 4, 2, 2, 1, 1))
-    netD:add(nn.LeakyReLU(0.2, true))
-    -- state size: (ndf) x 64 x 64
-end
-if opt.fineSize == 128 then
-  netD:add(SpatialConvolution(ndf, ndf, 4, 4, 2, 2, 1, 1))
-  netD:add(SpatialBatchNormalization(ndf)):add(nn.LeakyReLU(0.2, true))
-  -- state size: (ndf) x 32 x 32
-end
-netD:add(SpatialConvolution(ndf, ndf * 2, 4, 4, 2, 2, 1, 1))
-netD:add(SpatialBatchNormalization(ndf * 2)):add(nn.LeakyReLU(0.2, true))
--- state size: (ndf*2) x 16 x 16
-netD:add(SpatialConvolution(ndf * 2, ndf * 4, 4, 4, 2, 2, 1, 1))
-netD:add(SpatialBatchNormalization(ndf * 4)):add(nn.LeakyReLU(0.2, true))
--- state size: (ndf*4) x 8 x 8
-netD:add(SpatialConvolution(ndf * 4, ndf * 8, 4, 4, 2, 2, 1, 1))
-netD:add(SpatialBatchNormalization(ndf * 8)):add(nn.LeakyReLU(0.2, true))
--- state size: (ndf*8) x 4 x 4
-netD:add(SpatialConvolution(ndf * 8, 1, 4, 4))
-netD:add(nn.Sigmoid())
--- state size: 1 x 1 x 1
-netD:add(nn.View(1):setNumInputDims(3))
--- state size: 1
-
-netD:apply(weights_init)
 
 ---------------------------------------------------------------------------
 -- Loss Metrics
@@ -262,7 +275,7 @@ if opt.gpu > 0 then
    input_ctx_vis = input_ctx_vis:cuda(); input_ctx = input_ctx:cuda();  input_center = input_center:cuda()
    noise = noise:cuda();  label = label:cuda()
    netG = util.cudnn(netG);     netD = util.cudnn(netD)
-   netD:cuda();           netG:cuda();           criterion:cuda();      
+   netD:cuda();           netG:cuda();           criterion:cuda();
    if opt.wtl2~=0 then
       criterionMSE:cuda(); input_real_center = input_real_center:cuda();
    end
@@ -304,8 +317,8 @@ local fDx = function(x)
 
    gradParametersD:zero()
 
-   -- train with real
-   data_tm:reset(); data_tm:resume()
+   -- get batch
+   data_tm:reset(); data_tm:resume() -- start timer
    local real_ctx = data:getBatch()
    real_center = real_ctx  -- view
    input_center:copy(real_center)
@@ -317,24 +330,26 @@ local fDx = function(x)
    local mask, wastedIter
    wastedIter = 0
    while true do
-     local x = torch.uniform(1, MAX_SIZE-opt.fineSize)
-     local y = torch.uniform(1, MAX_SIZE-opt.fineSize)
-     mask = pattern[{{y,y+opt.fineSize-1},{x,x+opt.fineSize-1}}]  -- view, no allocation
-     local area = mask:sum()*100./(opt.fineSize*opt.fineSize)
-     if area>20 and area<30 then  -- want it to be approx 75% 0s and 25% 1s
-        -- print('wasted tries: ',wastedIter)
-        break
-     end
-     wastedIter = wastedIter + 1
+      local x = torch.uniform(1, MAX_SIZE-opt.fineSize)
+      local y = torch.uniform(1, MAX_SIZE-opt.fineSize)
+      mask = pattern[{{y,y+opt.fineSize-1},{x,x+opt.fineSize-1}}]  -- view, no allocation
+      local area = mask:sum()*100./(opt.fineSize*opt.fineSize)
+      if area>20 and area<30 then  -- want it to be approx 75% 0s and 25% 1s
+         -- print('wasted tries: ',wastedIter)
+         break
+      end
+      wastedIter = wastedIter + 1
    end
    torch.repeatTensor(mask_global,mask,opt.batchSize,1,1)
 
+   -- apply mask
    real_ctx[{{},{1},{},{}}][mask_global] = 2*117.0/255.0 - 1.0
    real_ctx[{{},{2},{},{}}][mask_global] = 2*104.0/255.0 - 1.0
    real_ctx[{{},{3},{},{}}][mask_global] = 2*123.0/255.0 - 1.0
    input_ctx:copy(real_ctx)
    data_tm:stop()
 
+   -- train with real
    label:fill(real_label)
    local output
    if opt.conditionAdv then
@@ -349,7 +364,7 @@ local fDx = function(x)
    else
       netD:backward(input_center, df_do)
    end
-   
+
    -- train with fake
    if opt.noisetype == 'uniform' then -- regenerate random noise
        noise:uniform(-1, 1)
@@ -363,8 +378,8 @@ local fDx = function(x)
       fake = netG:forward(input_ctx)
    end
    input_center:copy(fake)
-   label:fill(fake_label)
 
+   label:fill(fake_label)
    local output
    if opt.conditionAdv then
       output = netD:forward({input_ctx,input_center})
@@ -453,7 +468,9 @@ for epoch = 1, opt.niter do
    epoch_tm:reset()
    local counter = 0
    for i = 1, math.min(data:size(), opt.ntrain), opt.batchSize do
+      -- Reset timer
       tm:reset()
+
       -- (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
       optim.adam(fDx, parametersD, optimStateD)
 
@@ -493,7 +510,7 @@ for epoch = 1, opt.niter do
             fake = netG:forward(input_ctx_vis)
           end
           disp.image(fake, {win=opt.display_id, title=opt.name})
-          
+
           real_ctx[{{},{1},{},{}}][mask] = 1.0
           real_ctx[{{},{2},{},{}}][mask] = 1.0
           real_ctx[{{},{3},{},{}}][mask] = 1.0
@@ -513,7 +530,7 @@ for epoch = 1, opt.niter do
    paths.mkdir('checkpoints')
    parametersD, gradParametersD = nil, nil -- nil them to avoid spiking memory
    parametersG, gradParametersG = nil, nil
-   if epoch % 20 == 0 then
+   if epoch % 1 == 0 then
       util.save('checkpoints/' .. opt.name .. '_' .. epoch .. '_net_G.t7', netG, opt.gpu)
       util.save('checkpoints/' .. opt.name .. '_' .. epoch .. '_net_D.t7', netD, opt.gpu)
    end
