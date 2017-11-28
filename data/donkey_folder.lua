@@ -38,6 +38,7 @@ local sampleSize = {nc, opt.fineSize}
 local function loadImage(path)
    local input = image.load(path, nc, 'float')
    -- find the smaller dimension, and resize it to loadSize[2] (while keeping aspect ratio)
+   --[[
    if loadSize[2]>0 then
      local iW = input:size(3)
      local iH = input:size(2)
@@ -57,6 +58,45 @@ local function loadImage(path)
      local iH = scalef*input:size(2)
      input = image.scale(input, iH, iW)
    end
+   --]]
+   local iH = input:size(2)
+   local iW = input:size(3)
+
+   local oH = oW
+   local oW = iW
+   if loadSize[2]>0 then
+      if iW < iH then
+         oH = loadSize[2] * iH / iW
+         oW = loadSize[2]
+      else
+         oH = loadSize[2]
+         oW = loadSize[2] * iW / iH
+      end
+   elseif loadSize[2]<0 then
+      if loadSize[2] == -1 then
+         scalef = torch.uniform(0.5,1.5)
+      else
+         scalef = torch.uniform(1,3)
+      end
+      oH = scalef * iH
+      oW = scalef * iW
+   end
+
+   if oW < opt.fineSize or oH < opt.fineSize then
+      if iW < iH then
+         oH = opt.fineSize * iH / iW
+         oW = opt.fineSize
+      else
+         oH = opt.fineSize
+         oW = opt.fineSize * iW / iH
+      end
+   end
+
+   --[[
+   print("iW iH " .. iW .. " " .. iH)
+   print("oW oH " .. oW .. " " .. oH)
+   --]]
+   input = image.scale(input, oH, oW)
    return input
 end
 
@@ -75,8 +115,23 @@ local trainHook = function(self, path)
    -- do random crop
    local oW = sampleSize[2];
    local oH = sampleSize[2]
-   local h1 = math.ceil(torch.uniform(1e-2, iH-oH))
-   local w1 = math.ceil(torch.uniform(1e-2, iW-oW))
+   local h1 = math.ceil(torch.uniform(0, iH-oH))
+   local w1 = math.ceil(torch.uniform(0, iW-oW))
+
+   --[[
+   print("path " .. path)
+   print("iW-oW " .. iW-oW)
+   print("iH-oH " .. iH-oH)
+   print("iW " .. iW)
+   print("iH " .. iH)
+   print("oW " .. oW)
+   print("oH " .. oH)
+   print("h1 " .. h1)
+   print("w1 " .. w1)
+   print("h1+oH " .. h1+oH)
+   print("w1+oW " .. w1+oW)
+   --]]
+
    local out = image.crop(input, w1, h1, w1 + oW, h1 + oH)
    assert(out:size(2) == oW)
    assert(out:size(3) == oH)

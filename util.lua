@@ -98,9 +98,17 @@ end
 
 function util.load(filename, gpu)
    local net = torch.load(filename)
+   --net:apply(function(m) if m.weight then
+   --     m.gradWeight = m.weight:clone():zero();
+   --     m.gradBias = m.bias:clone():zero(); end end)
+   return net
+end
+
+function util.loadUnchanged(filename, gpu)
+   local net = torch.load(filename)
    net:apply(function(m) if m.weight then 
-        m.gradWeight = m.weight:clone():zero();
-        m.gradBias = m.bias:clone():zero(); end end)
+        m.gradWeight = m.weight:clone();
+        m.gradBias = m.bias:clone(); end end)
    return net
 end
 
